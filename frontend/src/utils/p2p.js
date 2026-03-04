@@ -5,7 +5,9 @@ let channel = null;
 
 const rtcConfig = {
   iceServers: [
-    { urls: "stun:stun.l.google.com:19302" }
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun4.l.google.com:19302" }
   ]
 };
 
@@ -122,17 +124,23 @@ export function sendData(data) {
 // ==============================
 // WAIT FOR ICE GATHERING
 // ==============================
-export function waitForIceGathering(pc) {
+export function waitForIceGathering(pc, timeoutMs = 5000) {
   return new Promise((resolve) => {
     if (pc.iceGatheringState === "complete") {
       resolve();
-    } else {
-      pc.onicegatheringstatechange = () => {
-        if (pc.iceGatheringState === "complete") {
-          resolve();
-        }
-      };
+      return;
     }
+
+    let timeoutHandle = setTimeout(() => {
+      resolve(); // Resolve after timeout
+    }, timeoutMs);
+
+    pc.onicegatheringstatechange = () => {
+      if (pc.iceGatheringState === "complete") {
+        clearTimeout(timeoutHandle);
+        resolve();
+      }
+    };
   });
 }
 

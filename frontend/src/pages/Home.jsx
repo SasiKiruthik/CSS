@@ -20,10 +20,11 @@ export default function Home() {
           <h2 className="font-medium mb-2">For Students</h2>
 
           <ul className="text-sm text-slate-300 list-disc list-inside space-y-1 mb-3">
-            <li>File encrypted locally using AES-256-GCM</li>
-            <li>SHA-256 fingerprint ensures integrity</li>
-            <li>Direct browser-to-browser transfer</li>
-            <li>No server storage or file retention</li>
+            <li>6-digit passcode for simple key derivation</li>
+            <li>AES-256-GCM encryption derived from passcode</li>
+            <li>SHA-256 fingerprint verification</li>
+            <li>Direct browser-to-browser transfer via WebRTC</li>
+            <li>No server storage</li>
           </ul>
 
           <Link
@@ -40,7 +41,8 @@ export default function Home() {
 
           <ul className="text-sm text-slate-300 list-disc list-inside space-y-1 mb-3">
             <li>Receive encrypted file via WebRTC</li>
-            <li>Decrypt only in memory using student-provided key</li>
+            <li>Enter 6-digit passcode to derive AES key</li>
+            <li>Decrypt only in memory</li>
             <li>SHA-256 verification before printing</li>
             <li>No preview, no saving, no storage</li>
           </ul>
@@ -57,6 +59,7 @@ export default function Home() {
 
       {/* SECURITY SUMMARY */}
       <div className="mt-8 text-xs text-slate-400 space-y-1 border-t border-slate-800 pt-4">
+        <p>✓ 6-digit passcode for key derivation (PBKDF2-SHA256)</p>
         <p>✓ AES-256-GCM client-side encryption</p>
         <p>✓ SHA-256 integrity verification</p>
         <p>✓ Zero backend storage</p>

@@ -1,7 +1,9 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
-  generateAESKey,
-  exportKey,
+  generatePasscode,
+  isPasscodeValid,
+  getTimeRemaining,
+  deriveKeyFromPasscode,
   encryptFile,
   sha256
 } from "../utils/crypto";
@@ -9,12 +11,13 @@ import { createConnection, sendData, waitForIceGathering } from "../utils/p2p";
 
 function UserUpload() {
   const [file, setFile] = useState(null);
-  const [shareKey, setShareKey] = useState("");
+  const [studentPasscode, setStudentPasscode] = useState(null); // {code, timestamp}
+  const [shopPasscode, setShopPasscode] = useState("");
   const [fileHash, setFileHash] = useState("");
-  const [offerSDP, setOfferSDP] = useState("");
-  const [answerSDP, setAnswerSDP] = useState("");
   const [status, setStatus] = useState("");
   const [dataChannelStatus, setDataChannelStatus] = useState("No connection");
+  const [timeRemaining, setTimeRemaining] = useState(0);
+  const [isConnected, setIsConnected] = useState(false);
 
   const handleFileChange = (e) => {
     const f = e.target.files[0];
@@ -35,47 +38,125 @@ function UserUpload() {
 
   const peerRef = useRef(null);
 
-  // STEP 1: Create WebRTC Offer
-  const createOffer = async () => {
-    const peer = createConnection(() => {}, () => {
-      console.log("[Student] Channel opened!");
-      setDataChannelStatus("✓ DataChannel OPEN - connected to shop");
-    });
-    peerRef.current = peer;
+  // Countdown timer for passcode validity
+  useEffect(() => {
+    if (!studentPasscode) {
+      setTimeRemaining(0);
+      return;
+    }
 
-    // Diagnostics
-    peer.onicecandidate = (ev) => {
-      console.log("[Student] ICE candidate:", ev.candidate);
-    };
-    peer.oniceconnectionstatechange = () => {
-      console.log("[Student] ICE state:", peer.iceConnectionState, peer.iceGatheringState);
-      setStatus(`Student ICE: ${peer.iceConnectionState} / ${peer.iceGatheringState}`);
-    };
+    const interval = setInterval(() => {
+      const remaining = getTimeRemaining(studentPasscode);
+      setTimeRemaining(remaining);
 
-    const offer = await peer.createOffer();
-    await peer.setLocalDescription(offer);
-    await waitForIceGathering(peer);
+      if (remaining === 0) {
+        setStudentPasscode(null);
+        setStatus("⏰ Passcode expired. Generate a new one.");
+      }
+    }, 1000);
 
-    setOfferSDP(JSON.stringify(peer.localDescription));
+    return () => clearInterval(interval);
+  }, [studentPasscode]);
+
+  // STEP 1: Generate Student Passcode
+  const generateNewPasscode = () => {
+    const newPasscode = generatePasscode();
+    setStudentPasscode(newPasscode);
+    setShopPasscode("");
+    setStatus("✓ Passcode generated. Share with shop keeper.");
   };
 
-  // STEP 2: Accept Shop Answer
-  const acceptAnswer = async () => {
-    if (!peerRef.current) {
-      alert("No offer created yet. Generate connection code first.");
+  // STEP 2: Validate Shop Keeper's Passcode and Auto-Connect
+  const connectWithShopPasscode = async () => {
+    if (!studentPasscode) {
+      alert("Generate your passcode first");
+      return;
+    }
+
+    if (!isPasscodeValid(studentPasscode)) {
+      alert("Your passcode expired. Generate a new one.");
+      setStudentPasscode(null);
+      return;
+    }
+
+    if (!shopPasscode.trim() || !/^\d{6}$/.test(shopPasscode.trim())) {
+      alert("Enter shop keeper's 6-digit passcode");
       return;
     }
 
     try {
-      const remote = JSON.parse(answerSDP);
-      console.log("[Student] Setting remote description:", remote.type);
-      await peerRef.current.setRemoteDescription(remote);
-      setStatus("Remote answer applied — waiting for data channel to open.");
+      setStatus("✓ Passcode validated! Connection establishing...");
+      
+      // Create peer connection
+      const peer = createConnection(() => {}, () => {
+        console.log("[Student] Channel opened!");
+        setDataChannelStatus("✓ DataChannel OPEN - connected to shop");
+        setIsConnected(true);
+        setStatus("✓ Connected! Ready to send file.");
+      });
+      peerRef.current = peer;
+
+      peer.onicecandidate = (ev) => {
+        console.log("[Student] ICE candidate:", ev.candidate);
+      };
+      peer.oniceconnectionstatechange = () => {
+        console.log("[Student] ICE state:", peer.iceConnectionState);
+      };
+      peer.onconnectionstatechange = () => {
+        console.log("[Student] Peer connection state:", peer.connectionState);
+        if (peer.connectionState === 'connected') {
+          setStatus("✓ Connected! Waiting for data channel...");
+        } else if (peer.connectionState === 'failed') {
+          setStatus("❌ Connection failed. Ensure shop keeper also entered your code.");
+        } else if (peer.connectionState === 'disconnected') {
+          setStatus("⚠ Disconnected. Try to connect again.");
+        }
+      };
+
+      // Create offer
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      await waitForIceGathering(peer);
+
+      // Store connection in localStorage for shop keeper to receive
+      const connKey = `webrtc_${studentPasscode.code}`;
+      localStorage.setItem(connKey, JSON.stringify({
+        offer: peer.localDescription,
+        studentPasscode: studentPasscode.code,
+        timestamp: Date.now()
+      }));
+
+      // Poll for answer from shop keeper (faster interval)
+      const pollAnswer = setInterval(async () => {
+        const answerKey = `webrtc_answer_${studentPasscode.code}`;
+        const answerData = localStorage.getItem(answerKey);
+        
+        if (answerData) {
+          clearInterval(pollAnswer);
+          try {
+            const { answer } = JSON.parse(answerData);
+            console.log("[Student] Received answer, setting remote description");
+            await peer.setRemoteDescription(answer);
+            localStorage.removeItem(answerKey);
+            console.log("[Student] Answer set successfully");
+          } catch (err) {
+            console.error("Failed to set answer:", err);
+            setStatus("Connection error: " + err.message);
+          }
+        }
+      }, 200); // Faster polling every 200ms
+
+      // Stop polling after 60 seconds
+      setTimeout(() => {
+        clearInterval(pollAnswer);
+        if (peer.connectionState === 'disconnected' || peer.connectionState === 'failed') {
+          setStatus("Connection failed. Make sure shop keeper entered your passcode.");
+        }
+      }, 60000);
+
     } catch (err) {
-      console.error("Failed to set remote description:", err);
-      const msg = err && err.message ? err.message : String(err);
-      alert("Invalid answer SDP. Check the pasted data.\n" + msg);
-      setStatus("Error applying remote answer: " + msg);
+      console.error("Failed to establish connection:", err);
+      setStatus("Error: " + err.message);
     }
   };
 
@@ -83,6 +164,22 @@ function UserUpload() {
   const handleUpload = async () => {
     if (!file) {
       alert("Select a file first");
+      return;
+    }
+    
+    if (!studentPasscode) {
+      alert("Generate your passcode first");
+      return;
+    }
+
+    if (!isPasscodeValid(studentPasscode)) {
+      alert("Your passcode expired. Generate a new one.");
+      setStudentPasscode(null);
+      return;
+    }
+
+    if (!isConnected) {
+      alert("Not connected to shop. Establish connection first.");
       return;
     }
 
@@ -94,10 +191,8 @@ function UserUpload() {
       // Generate SHA-256 fingerprint
       const hash = await sha256(buffer);
 
-      // Generate AES-256 key
-      const key = await generateAESKey();
-      const exportedKey = await exportKey(key);
-      setShareKey(exportedKey);
+      // Derive AES-256 key from student's passcode
+      const key = await deriveKeyFromPasscode(studentPasscode.code);
 
       // Encrypt file
       const { encrypted, iv } = await encryptFile(buffer, key);
@@ -118,7 +213,7 @@ function UserUpload() {
 
       // Wait a bit for all chunks to be sent
       setTimeout(() => {
-        setStatus("✓ Encrypted file sent to shop. Share this AES key with the print shop.");
+        setStatus("✓ Encrypted file sent to shop. Share your 6-digit passcode with them to decrypt.");
       }, 2000);
     } catch (err) {
       console.error("[Student] Error during send:", err);
@@ -128,67 +223,103 @@ function UserUpload() {
   };
 
   return (
-    <div className="p-6">
-      <h2 className="text-xl font-bold mb-4">Secure Upload</h2>
+    <div className="p-6 max-w-2xl">
+      <h2 className="text-2xl font-bold mb-6">📱 Secure Upload</h2>
 
-      <input type="file" onChange={handleFileChange} />
-
-      <div className="mt-4">
-        <button onClick={createOffer} className="bg-blue-500 text-white px-4 py-2 rounded">
-          Generate Connection Code
-        </button>
+      {/* FILE SELECTION */}
+      <div className="border border-slate-800 rounded-xl p-4 bg-slate-900/60 mb-4">
+        <label className="block text-sm mb-2">Select File to Print</label>
+        <input type="file" onChange={handleFileChange} className="block" />
+        {file && (
+          <div className="mt-2 text-sm text-slate-300">
+            <span className="font-semibold">📄 {file.name}</span>
+            <div className="text-xs text-slate-400 mt-1">
+              SHA-256: <span className="font-mono">{fileHash || "computing..."}</span>
+            </div>
+          </div>
+        )}
       </div>
 
-      {offerSDP && (
-        <div className="mt-4">
-          <p className="font-semibold">Share this with Shop:</p>
-          <textarea value={offerSDP} readOnly rows={6} className="w-full border p-2" />
-          {file && (
-            <div className="mt-2 text-sm">
-              <div className="font-semibold">File:</div>
-              <div className="font-mono break-all">{file.name}</div>
-              <div className="font-semibold mt-2">SHA-256 fingerprint (hex):</div>
-              <div className="font-mono break-all">{fileHash || "computing..."}</div>
-            </div>
+      {/* STEP 1: GENERATE PASSCODE */}
+      <div className="border border-slate-800 rounded-xl p-4 bg-slate-900/60 mb-4">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="font-semibold">Step 1: Generate Your Code</h3>
+          {studentPasscode && (
+            <span className={`text-xs font-bold ${timeRemaining > 60 ? 'text-emerald-400' : timeRemaining > 30 ? 'text-amber-400' : timeRemaining > 0 ? 'text-orange-400' : 'text-red-400'}`}>
+              Valid: {Math.floor(timeRemaining / 60)}:{String(timeRemaining % 60).padStart(2, '0')}
+            </span>
           )}
         </div>
-      )}
-
-      <div className="mt-4">
-        <textarea
-          placeholder="Paste Shop Answer Here"
-          value={answerSDP}
-          onChange={(e) => setAnswerSDP(e.target.value)}
-          rows={4}
-          className="w-full border p-2"
-        />
-        <button onClick={acceptAnswer} className="bg-green-500 text-white px-4 py-2 mt-2 rounded">
-          Connect
+        <button
+          onClick={generateNewPasscode}
+          className="bg-emerald-500 text-slate-950 px-4 py-2 rounded font-semibold hover:bg-emerald-400"
+        >
+          🔐 Generate 6-Digit Code
         </button>
+
+        {studentPasscode && (
+          <div className="mt-4 p-4 rounded-lg bg-emerald-500/20 border-2 border-emerald-500">
+            <p className="text-xs text-emerald-300 mb-2">📤 Share this code with shop keeper:</p>
+            <p className="text-4xl font-mono font-bold text-emerald-400 text-center tracking-widest">
+              {studentPasscode.code}
+            </p>
+            <p className="text-xs text-emerald-300 mt-2 text-center">
+              Call, SMS, WhatsApp, or tell them in-person
+            </p>
+          </div>
+        )}
       </div>
 
-      <div className="mt-6">
-        <button onClick={handleUpload} className="bg-purple-600 text-white px-6 py-2 rounded">
-          Encrypt & Send File
-        </button>
-      </div>
-
-      {shareKey && (
-        <div className="mt-6 bg-yellow-100 p-4 rounded">
-          <p className="font-semibold">Share this AES Key with Shop:</p>
-          <p className="break-all">{shareKey}</p>
+      {/* STEP 2: ENTER SHOP KEEPER'S CODE */}
+      {studentPasscode && isPasscodeValid(studentPasscode) && (
+        <div className="border border-slate-800 rounded-xl p-4 bg-slate-900/60 mb-4">
+          <h3 className="font-semibold mb-2">Step 2: Enter Shop Keeper's Code</h3>
+          <p className="text-xs text-slate-400 mb-3">Shop keeper will provide their code after receiving yours</p>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              placeholder="Enter 6 digits"
+              value={shopPasscode}
+              onChange={(e) => setShopPasscode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+              maxLength="6"
+              className="w-40 rounded-md bg-slate-900 border border-slate-700 px-3 py-2 text-2xl font-mono font-bold text-center"
+            />
+            <button
+              onClick={connectWithShopPasscode}
+              className="bg-blue-500 text-slate-950 px-4 py-2 rounded font-semibold hover:bg-blue-400"
+            >
+              ✓ Connect
+            </button>
+          </div>
         </div>
       )}
 
-      {fileHash && (
-        <div className="mt-2 text-xs text-slate-300">Share the SHA-256 fingerprint with the shop so they can verify the decrypted file before printing.</div>
+      {/* STEP 3: ENCRYPT & SEND */}
+      {isConnected && (
+        <div className="border border-slate-800 rounded-xl p-4 bg-slate-900/60 mb-4">
+          <h3 className="font-semibold mb-2">Step 3: Encrypt & Send File</h3>
+          <button
+            onClick={handleUpload}
+            className="bg-purple-600 text-white px-6 py-2 rounded font-semibold hover:bg-purple-500"
+          >
+            🚀 Encrypt & Send
+          </button>
+          <p className="text-xs text-slate-400 mt-2">
+            File will be encrypted with your passcode and sent via secure connection
+          </p>
+        </div>
       )}
 
-      {status && <p className="text-xs text-slate-300 mt-3">{status}</p>}
-      
-      {/* DEBUG: Show DataChannel Status */}
-      <div className="text-xs text-amber-300 mt-3 p-2 border border-amber-600 rounded bg-slate-900/50">
-        <strong>DataChannel Status:</strong> {dataChannelStatus}
+      {/* STATUS */}
+      {status && (
+        <div className="mt-4 p-3 rounded-md bg-slate-800/50 border border-slate-700">
+          <p className="text-sm text-slate-300">{status}</p>
+        </div>
+      )}
+
+      {/* DEBUG */}
+      <div className="text-xs text-amber-300 mt-4 p-2 border border-amber-600 rounded bg-slate-900/50">
+        <strong>Status:</strong> {dataChannelStatus}
       </div>
     </div>
   );
