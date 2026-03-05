@@ -19,6 +19,9 @@ export default function ShopDashboard() {
   const [expectedHash, setExpectedHash] = useState("");
   const [timeRemaining, setTimeRemaining] = useState(0);
   const [dataChannelStatus, setDataChannelStatus] = useState("No connection");
+  const [offerSDP, setOfferSDP] = useState("");
+  const [answerSDP, setAnswerSDP] = useState("");
+  const [showAnswerStep, setShowAnswerStep] = useState(false);
 
   const peerRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -47,15 +50,15 @@ export default function ShopDashboard() {
     return () => clearInterval(interval);
   }, [shopPasscode, studentPasscodeVerified]);
 
-  // STEP 1: Connect with Student's Passcode
-  const handleConnectWithStudentPasscode = async () => {
+  // STEP 1: Validate Student's Passcode and create peer
+  const handleValidateStudentPasscode = async () => {
     if (!studentPasscodeInput.trim() || !/^\d{6}$/.test(studentPasscodeInput.trim())) {
       alert("Enter student's 6-digit passcode");
       return;
     }
 
     try {
-      setStatus("Validating passcode and establishing connection...");
+      setStatus("Validating passcode and preparing to accept connection...");
       
       // Generate shop's response passcode
       const newShopPasscode = generatePasscode();
@@ -86,52 +89,71 @@ export default function ShopDashboard() {
         }
       };
 
-      // Poll for student's offer (faster interval)
-      const connKey = `webrtc_${studentPasscodeInput.trim()}`;
-      
-      const pollOffer = setInterval(async () => {
-        const connData = localStorage.getItem(connKey);
-        
-        if (connData) {
-          clearInterval(pollOffer);
-          try {
-            const { offer } = JSON.parse(connData);
-            console.log("[Shop] Setting remote offer");
-            await peer.setRemoteDescription(offer);
-
-            // Create answer
-            const answer = await peer.createAnswer();
-            await peer.setLocalDescription(answer);
-            await waitForIceGathering(peer, 5000);
-
-            // Send answer back to student
-            const answerKey = `webrtc_answer_${studentPasscodeInput.trim()}`;
-            localStorage.setItem(answerKey, JSON.stringify({
-              answer: peer.localDescription,
-              timestamp: Date.now()
-            }));
-
-            console.log("[Shop] Answer stored in sessionStorage");
-            setStatus("✓ Connection established! Ready to receive file.");
-          } catch (err) {
-            console.error("Failed to process offer:", err);
-            setStatus("Connection error: " + err.message);
-          }
-        }
-      }, 200); // Faster polling every 200ms
-
-      // Stop polling after 60 seconds
-      setTimeout(() => {
-        clearInterval(pollOffer);
-        if (peer.connectionState === 'disconnected' || peer.connectionState === 'failed') {
-          setStatus("Connection failed. Check you entered the correct student passcode.");
-        }
-      }, 60000);
+      setStatus("✓ Ready to receive offer from student!");
 
     } catch (err) {
       console.error(err);
       const msg = err && err.message ? err.message : String(err);
       setStatus("Failed to validate: " + msg);
+    }
+  };
+
+  // STEP 1.5: Paste student's offer
+  const pasteStudentOffer = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      setOfferSDP(text);
+      setStatus("✓ Offer pasted. Click 'Set Offer' to process.");
+    } catch (err) {
+      console.error("Failed to paste:", err);
+      setStatus("Failed to paste from clipboard.");
+    }
+  };
+
+  // STEP 2: Set student's offer and create answer
+  const setStudentOfferAndCreateAnswer = async () => {
+    if (!offerSDP.trim()) {
+      alert("Paste the student's offer first");
+      return;
+    }
+
+    if (!peerRef.current) {
+      alert("Validate student's passcode first");
+      return;
+    }
+
+    try {
+      const offerB64 = offerSDP.trim();
+      const offer = JSON.parse(atob(offerB64));
+      
+      console.log("[Shop] Setting remote offer");
+      await peerRef.current.setRemoteDescription(offer);
+
+      // Create answer
+      const answer = await peerRef.current.createAnswer();
+      await peerRef.current.setLocalDescription(answer);
+      await waitForIceGathering(peerRef.current, 5000);
+
+      // Display answer in base64 for manual copy-paste
+      const answerB64 = btoa(JSON.stringify(peerRef.current.localDescription));
+      setAnswerSDP(answerB64);
+      setShowAnswerStep(true);
+      setStatus("✓ Answer created! Copy the answer text and send back to student.");
+
+    } catch (err) {
+      console.error("Failed to process offer:", err);
+      setStatus("Connection error: " + err.message);
+    }
+  };
+
+  // STEP 2.5: Copy answer to clipboard
+  const copyAnswerToClipboard = async () => {
+    try {
+      await navigator.clipboard.writeText(answerSDP);
+      setStatus("✓ Answer copied to clipboard! Send it back to student.");
+    } catch (err) {
+      console.error("Failed to copy:", err);
+      setStatus("Failed to copy. Please copy manually.");
     }
   };
 
@@ -322,7 +344,7 @@ export default function ShopDashboard() {
             className="w-40 rounded-md bg-slate-900 border border-slate-700 px-3 py-2 text-2xl font-mono font-bold text-center"
           />
           <button
-            onClick={handleConnectWithStudentPasscode}
+            onClick={handleValidateStudentPasscode}
             className="bg-emerald-500 text-slate-950 px-4 py-2 rounded font-semibold hover:bg-emerald-400"
           >
             ✓ Validate
@@ -335,6 +357,52 @@ export default function ShopDashboard() {
           </button>
         </div>
       </div>
+
+      {/* STEP 2: RECEIVE OFFER FROM STUDENT */}
+      {studentPasscodeVerified && (
+        <div className="border border-slate-800 rounded-xl p-4 bg-slate-900/60 mb-4">
+          <h3 className="font-semibold mb-2">Step 2: Receive Connection Offer</h3>
+          <p className="text-xs text-slate-400 mb-3">Student will send you their offer. Paste it here:</p>
+          <textarea
+            value={offerSDP}
+            onChange={(e) => setOfferSDP(e.target.value)}
+            placeholder="Paste student's offer here..."
+            className="w-full h-32 rounded-md bg-slate-900 border border-slate-700 px-2 py-1.5 text-xs font-mono text-slate-200 mb-2"
+          />
+          <div className="flex gap-2 mb-4">
+            <button
+              onClick={pasteStudentOffer}
+              className="bg-slate-700 text-slate-50 px-4 py-1.5 rounded font-semibold hover:bg-slate-600 text-sm"
+            >
+              📋 Paste Offer
+            </button>
+            <button
+              onClick={setStudentOfferAndCreateAnswer}
+              className="bg-blue-500 text-slate-950 px-4 py-1.5 rounded font-semibold hover:bg-blue-400 text-sm"
+            >
+              ✓ Process Offer
+            </button>
+          </div>
+
+          {/* ANSWER DISPLAY */}
+          {showAnswerStep && answerSDP && (
+            <div className="p-4 rounded-lg bg-blue-500/20 border-2 border-blue-500">
+              <p className="text-xs text-blue-300 mb-2">📤 Share this answer with student (copy and send via text/email):</p>
+              <textarea
+                readOnly
+                value={answerSDP}
+                className="w-full h-32 rounded-md bg-slate-900 border border-slate-700 px-2 py-1.5 text-xs font-mono text-slate-200"
+              />
+              <button
+                onClick={copyAnswerToClipboard}
+                className="mt-2 bg-slate-700 text-slate-50 px-4 py-1.5 rounded font-semibold hover:bg-slate-600 text-sm"
+              >
+                📋 Copy Answer
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* STEP 2: SHOW SHOP PASSCODE */}
       {studentPasscodeVerified && shopPasscode && (

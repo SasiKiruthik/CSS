@@ -18,6 +18,10 @@ function UserUpload() {
   const [dataChannelStatus, setDataChannelStatus] = useState("No connection");
   const [timeRemaining, setTimeRemaining] = useState(0);
   const [isConnected, setIsConnected] = useState(false);
+  const [offerSDP, setOfferSDP] = useState("");
+  const [answerSDP, setAnswerSDP] = useState("");
+  const [showOfferStep, setShowOfferStep] = useState(false);
+  const [showAnswerStep, setShowAnswerStep] = useState(false);
 
   const handleFileChange = (e) => {
     const f = e.target.files[0];
@@ -66,8 +70,8 @@ function UserUpload() {
     setStatus("✓ Passcode generated. Share with shop keeper.");
   };
 
-  // STEP 2: Validate Shop Keeper's Passcode and Auto-Connect
-  const connectWithShopPasscode = async () => {
+  // STEP 2: Create Offer manually
+  const createOfferForShop = async () => {
     if (!studentPasscode) {
       alert("Generate your passcode first");
       return;
@@ -85,7 +89,7 @@ function UserUpload() {
     }
 
     try {
-      setStatus("✓ Passcode validated! Connection establishing...");
+      setStatus("✓ Passcode validated! Creating peer connection...");
       
       // Create peer connection
       const peer = createConnection(() => {}, () => {
@@ -118,45 +122,58 @@ function UserUpload() {
       await peer.setLocalDescription(offer);
       await waitForIceGathering(peer);
 
-      // Store connection in localStorage for shop keeper to receive
-      const connKey = `webrtc_${studentPasscode.code}`;
-      localStorage.setItem(connKey, JSON.stringify({
-        offer: peer.localDescription,
-        studentPasscode: studentPasscode.code,
-        timestamp: Date.now()
-      }));
-
-      // Poll for answer from shop keeper (faster interval)
-      const pollAnswer = setInterval(async () => {
-        const answerKey = `webrtc_answer_${studentPasscode.code}`;
-        const answerData = localStorage.getItem(answerKey);
-        
-        if (answerData) {
-          clearInterval(pollAnswer);
-          try {
-            const { answer } = JSON.parse(answerData);
-            console.log("[Student] Received answer, setting remote description");
-            await peer.setRemoteDescription(answer);
-            localStorage.removeItem(answerKey);
-            console.log("[Student] Answer set successfully");
-          } catch (err) {
-            console.error("Failed to set answer:", err);
-            setStatus("Connection error: " + err.message);
-          }
-        }
-      }, 200); // Faster polling every 200ms
-
-      // Stop polling after 60 seconds
-      setTimeout(() => {
-        clearInterval(pollAnswer);
-        if (peer.connectionState === 'disconnected' || peer.connectionState === 'failed') {
-          setStatus("Connection failed. Make sure shop keeper entered your passcode.");
-        }
-      }, 60000);
+      // Display offer in base64 for manual copy-paste
+      const offerB64 = btoa(JSON.stringify(peer.localDescription));
+      setOfferSDP(offerB64);
+      setShowOfferStep(true);
+      setShowAnswerStep(false);
+      setStatus("✓ Offer created! Copy the offer text and share with shop keeper.");
 
     } catch (err) {
-      console.error("Failed to establish connection:", err);
+      console.error("Failed to create offer:", err);
       setStatus("Error: " + err.message);
+    }
+  };
+
+  // STEP 2.5: Copy offer to clipboard
+  const copyOfferToClipboard = async () => {
+    try {
+      await navigator.clipboard.writeText(offerSDP);
+      setStatus("✓ Offer copied to clipboard!");
+    } catch (err) {
+      console.error("Failed to copy:", err);
+      setStatus("Failed to copy. Please copy manually.");
+    }
+  };
+
+  // STEP 2.75: Paste answer from shop
+  const pasteAnswerFromClipboard = async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      setAnswerSDP(text);
+      setStatus("✓ Answer pasted. Click 'Set Answer' to complete connection.");
+    } catch (err) {
+      console.error("Failed to paste:", err);
+      setStatus("Failed to paste from clipboard.");
+    }
+  };
+
+  // STEP 2.9: Set remote answer
+  const setRemoteAnswer = async () => {
+    if (!answerSDP.trim()) {
+      alert("Paste the answer SDP first");
+      return;
+    }
+
+    try {
+      const answerB64 = answerSDP.trim();
+      const answer = JSON.parse(atob(answerB64));
+      await peerRef.current.setRemoteDescription(answer);
+      setStatus("✓ Answer set successfully! Waiting for data channel to open...");
+      setShowAnswerStep(false);
+    } catch (err) {
+      console.error("Failed to set answer:", err);
+      setStatus("Error setting answer: " + err.message);
     }
   };
 
@@ -270,12 +287,12 @@ function UserUpload() {
         )}
       </div>
 
-      {/* STEP 2: ENTER SHOP KEEPER'S CODE */}
+      {/* STEP 2: SHARE CONNECTION DETAILS */}
       {studentPasscode && isPasscodeValid(studentPasscode) && (
         <div className="border border-slate-800 rounded-xl p-4 bg-slate-900/60 mb-4">
-          <h3 className="font-semibold mb-2">Step 2: Enter Shop Keeper's Code</h3>
+          <h3 className="font-semibold mb-2">Step 2: Share Connection Details</h3>
           <p className="text-xs text-slate-400 mb-3">Shop keeper will provide their code after receiving yours</p>
-          <div className="flex gap-2">
+          <div className="flex gap-2 mb-4">
             <input
               type="text"
               placeholder="Enter 6 digits"
@@ -285,12 +302,57 @@ function UserUpload() {
               className="w-40 rounded-md bg-slate-900 border border-slate-700 px-3 py-2 text-2xl font-mono font-bold text-center"
             />
             <button
-              onClick={connectWithShopPasscode}
+              onClick={createOfferForShop}
               className="bg-blue-500 text-slate-950 px-4 py-2 rounded font-semibold hover:bg-blue-400"
             >
-              ✓ Connect
+              ✓ Create Offer
             </button>
           </div>
+
+          {/* OFFER DISPLAY */}
+          {showOfferStep && offerSDP && (
+            <div className="mt-4 p-4 rounded-lg bg-blue-500/20 border-2 border-blue-500 mb-4">
+              <p className="text-xs text-blue-300 mb-2">📤 Share this offer with shop keeper (copy and send via text/email):</p>
+              <textarea
+                readOnly
+                value={offerSDP}
+                className="w-full h-32 rounded-md bg-slate-900 border border-slate-700 px-2 py-1.5 text-xs font-mono text-slate-200"
+              />
+              <button
+                onClick={copyOfferToClipboard}
+                className="mt-2 bg-slate-700 text-slate-50 px-4 py-1.5 rounded font-semibold hover:bg-slate-600 text-sm"
+              >
+                📋 Copy Offer
+              </button>
+            </div>
+          )}
+
+          {/* ANSWER PASTE */}
+          {showOfferStep && (
+            <div className="mt-4 p-4 rounded-lg bg-amber-500/20 border-2 border-amber-500">
+              <p className="text-xs text-amber-300 mb-2">📥 Shop keeper will send you their answer. Paste it here:</p>
+              <textarea
+                value={answerSDP}
+                onChange={(e) => setAnswerSDP(e.target.value)}
+                placeholder="Paste shop keeper's answer here..."
+                className="w-full h-32 rounded-md bg-slate-900 border border-slate-700 px-2 py-1.5 text-xs font-mono text-slate-200 mb-2"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={pasteAnswerFromClipboard}
+                  className="bg-slate-700 text-slate-50 px-4 py-1.5 rounded font-semibold hover:bg-slate-600 text-sm"
+                >
+                  📋 Paste Answer
+                </button>
+                <button
+                  onClick={setRemoteAnswer}
+                  className="bg-emerald-500 text-slate-950 px-4 py-1.5 rounded font-semibold hover:bg-emerald-400 text-sm"
+                >
+                  ✓ Set Answer
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
